@@ -286,7 +286,7 @@ class LogStash::Outputs::CloudWatchLogs < LogStash::Outputs::Base
         @scheduled_batcher = Thread.new do
           loop do
             sleep(@buffer_duration / 1000.0)
-            add_current_batch_to_out_queue(:scheduled)
+            enq(:scheduled)
           end
         end
       end
@@ -299,11 +299,17 @@ class LogStash::Outputs::CloudWatchLogs < LogStash::Outputs::Base
     # * If ongoing batch is going to overflow with this addition, adds batch to out queue,
     # and then adds the item to the new batch
     def enq(item)
-      status = try_add_item(item)
-      if status != 0
-        add_current_batch_to_out_queue(:add)
-        if status == -1
-          try_add_item(item)
+      @batch_update_mutex.synchronize do
+        if item == :scheduled || item == :close
+          add_current_batch_to_out_queue(item)
+          return
+        end
+        status = try_add_item(item)
+        if status != 0
+          add_current_batch_to_out_queue(:add)
+          if status == -1
+            try_add_item(item)
+          end
         end
       end
     end
@@ -314,7 +320,7 @@ class LogStash::Outputs::CloudWatchLogs < LogStash::Outputs::Base
     # Waits until consumer completes.
     def close
       while @in_size != 0 do
-        add_current_batch_to_out_queue(:close)
+        enq(:close)
         sleep(1)
       end
       @out_queue.enq(CLOSE_BATCH)
@@ -337,20 +343,18 @@ class LogStash::Outputs::CloudWatchLogs < LogStash::Outputs::Base
     # Tries to add an item to buffer
     def try_add_item(item)
       item_size = @size_of_item_proc.call(item)
-      @batch_update_mutex.synchronize do
-        if @in_count + 1 == @max_batch_count ||
-          @in_size + item_size == @max_batch_size
-          # accept item, but can't accept more items
-          add_item(item)
-          return 1
-        elsif @in_size + item_size > @max_batch_size
-          # cannot accept item
-          return -1
-        else
-          add_item(item)
-          # accept item, and may accept next item
-          return 0
-        end
+      if @in_count + 1 == @max_batch_count ||
+        @in_size + item_size == @max_batch_size
+        # accept item, but can't accept more items
+        add_item(item)
+        return 1
+      elsif @in_size + item_size > @max_batch_size
+        # cannot accept item
+        return -1
+      else
+        add_item(item)
+        # accept item, and may accept next item
+        return 0
       end
     end
 
@@ -363,21 +367,19 @@ class LogStash::Outputs::CloudWatchLogs < LogStash::Outputs::Base
 
     # Adds batch to out queue
     def add_current_batch_to_out_queue(from)
-      @batch_update_mutex.synchronize do
-        if from == :scheduled && (Time.now - @last_batch_time) * 1000 < @buffer_duration
-          return
-        end
-        if @in_batch.size == 0
-          @last_batch_time = Time.now
-          return
-        end
-        @logger.debug("Added batch with #{in_count} items in #{in_size} by #{from}") if @logger
-        @out_queue.enq(@in_batch)
-        @in_batch = Array.new
-        @in_count = 0
-        @in_size = 0
-        @last_batch_time = Time.now
+      if from == :scheduled && (Time.now - @last_batch_time) * 1000 < @buffer_duration
+        return
       end
+      if @in_batch.size == 0
+        @last_batch_time = Time.now
+        return
+      end
+      @logger.debug("Added batch with #{in_count} items in #{in_size} by #{from}") if @logger
+      @out_queue.enq(@in_batch)
+      @in_batch = Array.new
+      @in_count = 0
+      @in_size = 0
+      @last_batch_time = Time.now
     end
 
   end

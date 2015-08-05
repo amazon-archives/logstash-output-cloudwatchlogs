@@ -590,4 +590,35 @@ describe "outputs/cloudwatchlogs/buffer" do
       item_count.should == 33
     end
   end
+
+  it "should not miss any item" do
+    @buffer = LogStash::Outputs::CloudWatchLogs::Buffer.new(
+      max_batch_count: 137, max_batch_size: 1000, buffer_duration: 5000,
+      out_queue_size: 50,
+      size_of_item_proc: Proc.new {|item| item.bytesize})
+    item_count = 0
+    consumer = Thread.new do
+      @buffer.deq do |batch|
+        item_count += batch.size
+      end
+    end
+    threads = []
+    num_of_threads = 100
+    num_of_items = 10000
+    # 100 threads plus one scheduled batcher thread
+    num_of_threads.times do |m|
+      threads << Thread.new do
+        num_of_items.times do |i|
+          @buffer.enq("#{i}")
+        end
+      end
+    end
+    # let producers complete the writes
+    threads.map(&:join)
+    # move all items to the out queue
+    @buffer.close
+    # let consumer complete the read
+    consumer.join
+    item_count.should == num_of_items * num_of_threads
+  end
 end
