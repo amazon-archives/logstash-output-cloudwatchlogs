@@ -167,6 +167,44 @@ describe "outputs/cloudwatchlogs" do
             {:timestamp => 124, :message => 'zzz'}])
         end
       end
+      context "when log events span more than 24 hours" do
+        it "should break log events into multiple batches and no batch spans more than 24 hours" do
+          twenty_four_hours_in_mills = 24 * 60 * 60 * 1000
+          expect(@cwl).to receive(:put_log_events).once.with(
+            :log_events => [
+              {:timestamp => 123, :message => 'abc'}],
+            :log_group_name => 'lg',
+            :log_stream_name => 'ls',
+            :sequence_token => 'token'
+          ) { @response }
+          expect(@cwl).to receive(:put_log_events).once.with(
+            :log_events => [
+              {:timestamp => 123 + twenty_four_hours_in_mills + 1, :message => 'zzz'}],
+            :log_group_name => 'lg',
+            :log_stream_name => 'ls',
+            :sequence_token => 'ntoken'
+          )
+          @output.flush([
+            {:timestamp => 123, :message => 'abc'},
+            {:timestamp => 123 + twenty_four_hours_in_mills + 1, :message => 'zzz'}])
+        end
+      end
+      context "when log events span exactly 24 hours" do
+        it "should not break log events into multiple batches" do
+          twenty_four_hours_in_mills = 24 * 60 * 60 * 1000
+          expect(@cwl).to receive(:put_log_events).once.with(
+            :log_events => [
+              {:timestamp => 123, :message => 'abc'},
+              {:timestamp => 123 + twenty_four_hours_in_mills, :message => 'zzz'}],
+            :log_group_name => 'lg',
+            :log_stream_name => 'ls',
+            :sequence_token => 'token'
+          ) { @response }
+          @output.flush([
+            {:timestamp => 123, :message => 'abc'},
+            {:timestamp => 123 + twenty_four_hours_in_mills, :message => 'zzz'}])
+        end
+      end
     end
 
     describe "error handling" do
@@ -403,7 +441,7 @@ describe "outputs/cloudwatchlogs/buffer" do
     end
   end
 
-  describe "#add" do
+  describe "#enq" do
     context "when batch is closed based on item count/size" do
       before :each do
         @buffer = LogStash::Outputs::CloudWatchLogs::Buffer.new(
@@ -531,7 +569,7 @@ describe "outputs/cloudwatchlogs/buffer" do
     end
   end
 
-  describe "#out" do
+  describe "#deq" do
     it "should keep processing items until the buffer is closed" do
       @buffer = LogStash::Outputs::CloudWatchLogs::Buffer.new(
         max_batch_count: 5, max_batch_size: 100, buffer_duration: 1000,

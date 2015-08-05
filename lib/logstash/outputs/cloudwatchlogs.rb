@@ -38,6 +38,7 @@ class LogStash::Outputs::CloudWatchLogs < LogStash::Outputs::Base
   PER_EVENT_OVERHEAD = 26
   MAX_BATCH_SIZE = 1024 * 1024
   MAX_BATCH_COUNT = 10000
+  MAX_DISTANCE_BETWEEN_EVENTS = 86400 * 1000
   MIN_DELAY = 0.2
   MIN_BUFFER_DURATION = 5000
   # Backoff up to 64 seconds upon failure
@@ -133,13 +134,21 @@ class LogStash::Outputs::CloudWatchLogs < LogStash::Outputs::Base
   public
   def flush(events)
     return if events.nil? or events.empty?
+    log_event_batches = prepare_log_events(events)
+    log_event_batches.each do |log_events|
+      put_log_events(log_events)
+    end
+  end
+
+  private
+  def put_log_events(log_events)
+    return if log_events.nil? or log_events.empty?
     # Shouldn't send two requests within MIN_DELAY
     delay = MIN_DELAY - (Time.now.to_f - @last_flush)
     sleep(delay) if delay > 0
-    log_events = events.sort {|e1,e2| e1[:timestamp] <=> e2[:timestamp]}
     backoff = 1
     begin
-      @logger.info("Sending #{events.size} events to #{@log_group_name}/#{@log_stream_name}")
+      @logger.info("Sending #{log_events.size} events to #{@log_group_name}/#{@log_stream_name}")
       @last_flush = Time.now.to_f
       if @dry_run
         log_events.each do |event|
@@ -218,6 +227,29 @@ class LogStash::Outputs::CloudWatchLogs < LogStash::Outputs::Base
     return status
   end
 
+  private
+  def prepare_log_events(events)
+    log_events = events.sort {|e1,e2| e1[:timestamp] <=> e2[:timestamp]}
+    batches = []
+    if log_events[-1][:timestamp] - log_events[0][:timestamp] > MAX_DISTANCE_BETWEEN_EVENTS
+      temp_batch = []
+      log_events.each do |log_event|
+        if temp_batch.empty? || log_event[:timestamp] - temp_batch[0][:timestamp] <= MAX_DISTANCE_BETWEEN_EVENTS
+          temp_batch << log_event
+        else
+          batches << temp_batch
+          temp_batch = []
+          temp_batch << log_event
+        end
+      end
+      if not temp_batch.empty?
+        batches << temp_batch
+      end
+    else
+      batches << log_events
+    end
+    batches
+  end
 
   ##
   # This class buffers series of single item to batches and puts batches to
