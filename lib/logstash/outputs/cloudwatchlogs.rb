@@ -123,13 +123,12 @@ class LogStash::Outputs::CloudWatchLogs < LogStash::Outputs::Base
   end # def receive
 
   public
-  def teardown
+  def close
     @logger.info("Going to clean up resources")
     @buffer.close
     @publisher.join
     @cwl = nil
-    finished
-  end # def teardown
+  end # def close
 
   public
   def flush(events)
