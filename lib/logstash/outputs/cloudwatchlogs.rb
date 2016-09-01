@@ -59,6 +59,10 @@ class LogStash::Outputs::CloudWatchLogs < LogStash::Outputs::Base
   # The amount of time to batch log events, in milliseconds.
   config :buffer_duration, :validate => :number, :default => 5000
 
+  # Set to true to encode the events using a codec.
+  # The default behaviour is to just send the "message" field of the event
+  config :use_codec, :validate => :boolean, :default => false
+
   # The max number of batches to buffer.
   # Log event is added to batch first. When batch is full or exceeds specified
   # buffer_duration milliseconds, batch is added to queue which is consumed by
@@ -102,6 +106,26 @@ class LogStash::Outputs::CloudWatchLogs < LogStash::Outputs::Base
         flush(batch)
       end
     end
+
+    if @log_stream_name.include? "%instance_id%"
+      require "net/http"
+      @log_stream_name.gsub!("%instance_id%", Net::HTTP.get(URI.parse("http://169.254.169.254/latest/meta-data/instance-id")))
+    end
+
+    if @log_stream_name.include? "%hostname%"
+      require "socket"
+      @log_stream_name.gsub!("%hostname%", Socket.gethostname)
+    end
+
+    if @log_stream_name.include? "%ipv4%"
+      require "socket"
+      @log_stream_name.gsub!("%ipv4%", Socket.ip_address_list.find { |ai| ai.ipv4? && !ai.ipv4_loopback? }.ip_address)
+    end
+
+    if @use_codec
+      @codec.on_event() {|event, payload| @buffer.enq({:timestamp => event.timestamp.time.to_f*1000,
+        :message => payload})}
+    end
   end # def register
 
   public
@@ -117,9 +141,12 @@ class LogStash::Outputs::CloudWatchLogs < LogStash::Outputs::Base
     end
     return if invalid?(event)
 
-    @buffer.enq(
-      {:timestamp => event.timestamp.time.to_f*1000,
+    if @use_codec
+      @codec.encode(event)
+    else
+      @buffer.enq({:timestamp => event.timestamp.time.to_f*1000,
        :message => event[MESSAGE] })
+    end
   end # def receive
 
   public
@@ -219,7 +246,7 @@ class LogStash::Outputs::CloudWatchLogs < LogStash::Outputs::Base
 
   private
   def invalid?(event)
-    status = event[TIMESTAMP].nil? || event[MESSAGE].nil?
+    status = event[TIMESTAMP].nil? || (!@use_codec && event[MESSAGE].nil?)
     if status
       @logger.warn("Skipping invalid event #{event.to_hash}")
     end
